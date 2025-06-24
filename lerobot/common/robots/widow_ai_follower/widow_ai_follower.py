@@ -19,13 +19,12 @@ import time
 from functools import cached_property
 from typing import Any
 
+import trossen_arm
+
 from lerobot.common.cameras.utils import make_cameras_from_configs
 from lerobot.common.errors import DeviceAlreadyConnectedError, DeviceNotConnectedError
 from lerobot.common.motors import Motor, MotorCalibration, MotorNormMode
-from lerobot.common.motors.dynamixel import (
-    DynamixelMotorsBus,
-    TorqueMode,
-)
+from lerobot.common.motors.trossen import TrossenArmDriver
 
 from ..robot import Robot
 from ..utils import ensure_safe_goal_position
@@ -46,18 +45,21 @@ class WidowAIFollower(Robot):
         super().__init__(config)
         self.config = config
         norm_mode_body = MotorNormMode.DEGREES if config.use_degrees else MotorNormMode.RANGE_M100_100
-        self.bus = DynamixelMotorsBus(
+        
+        # Use TrossenArmDriver instead of DynamixelMotorsBus
+        self.bus = TrossenArmDriver(
             port=self.config.port,
             motors={
-                "shoulder_pan": Motor(1, "PLACEHOLDER_MODEL", norm_mode_body),
-                "shoulder_lift": Motor(2, "PLACEHOLDER_MODEL", norm_mode_body),
-                "elbow_flex": Motor(3, "PLACEHOLDER_MODEL", norm_mode_body),
-                "wrist_1": Motor(4, "PLACEHOLDER_MODEL", norm_mode_body),
-                "wrist_2": Motor(5, "PLACEHOLDER_MODEL", norm_mode_body),
-                "wrist_3": Motor(6, "PLACEHOLDER_MODEL", norm_mode_body),
-                "gripper": Motor(7, "PLACEHOLDER_MODEL", MotorNormMode.RANGE_0_100),
+                "shoulder_pan": Motor(1, "4340", norm_mode_body),
+                "shoulder_lift": Motor(2, "4340", norm_mode_body),
+                "elbow_flex": Motor(3, "4340", norm_mode_body),
+                "wrist_1": Motor(4, "4310", norm_mode_body),
+                "wrist_2": Motor(5, "4310", norm_mode_body),
+                "wrist_3": Motor(6, "4310", norm_mode_body),
+                "gripper": Motor(7, "4310", norm_mode_body),  # Required by Trossen driver (may be unplugged)
             },
             calibration=self.calibration,
+            model=self.config.model,  # Use model from config
         )
         self.cameras = make_cameras_from_configs(config.cameras)
 
@@ -107,10 +109,10 @@ class WidowAIFollower(Robot):
 
     def calibrate(self) -> None:
         logger.info(f"\nRunning calibration of {self}")
+        # For Trossen arms, calibration is typically pre-configured
+        # but we can still set up homing offsets if needed
         self.bus.disable_torque()
-        for motor in self.bus.motors:
-            self.bus.write("Operating_Mode", motor, TorqueMode.DISABLED.value)
-
+        
         input(f"Move {self} to the middle of its range of motion and press ENTER....")
         homing_offsets = self.bus.set_half_turn_homings()
 
@@ -135,14 +137,13 @@ class WidowAIFollower(Robot):
         print("Calibration saved to", self.calibration_fpath)
 
     def configure(self) -> None:
-        with self.bus.torque_disabled():
-            self.bus.configure_motors()
-            for motor in self.bus.motors:
-                self.bus.write("Operating_Mode", motor, TorqueMode.ENABLED.value)
-                # Set PID values for Dynamixel motors (placeholder values)
-                self.bus.write("Position_P_Gain", motor, 800)  # PLACEHOLDER
-                self.bus.write("Position_I_Gain", motor, 0)    # PLACEHOLDER
-                self.bus.write("Position_D_Gain", motor, 4000) # PLACEHOLDER
+        # For Trossen follower arms, use proper initialization sequence
+        # This moves to home position and keeps in position mode until teleoperation starts
+        self.bus.initialize_for_teleoperation(is_leader=False)
+        
+    def prepare_for_teleoperation(self) -> None:
+        """Set the robot to teleoperation mode after both arms are initialized."""
+        self.bus.set_teleoperation_mode(is_leader=False)
 
     def setup_motors(self) -> None:
         for motor in reversed(self.bus.motors):
@@ -198,6 +199,14 @@ class WidowAIFollower(Robot):
         # Send goal position to the arm
         self.bus.sync_write("Goal_Position", goal_pos)
         return {f"{motor}.pos": val for motor, val in goal_pos.items()}
+
+    def get_external_efforts(self) -> dict[str, float]:
+        """Get external efforts/forces from all motors for force feedback."""
+        if not self.is_connected:
+            raise DeviceNotConnectedError(f"{self} is not connected.")
+        
+        efforts_dict = self.bus.sync_read("External_Efforts", normalize=False)
+        return {f"{motor}.force": val for motor, val in efforts_dict.items()}
 
     def disconnect(self):
         if not self.is_connected:
