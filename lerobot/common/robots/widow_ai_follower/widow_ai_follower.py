@@ -19,6 +19,8 @@ import time
 from functools import cached_property
 from typing import Any
 
+import trossen_arm
+
 from lerobot.common.cameras.utils import make_cameras_from_configs
 from lerobot.common.errors import DeviceAlreadyConnectedError, DeviceNotConnectedError
 from lerobot.common.motors import Motor, MotorCalibration, MotorNormMode
@@ -54,7 +56,7 @@ class WidowAIFollower(Robot):
                 "wrist_1": Motor(4, "4310", norm_mode_body),
                 "wrist_2": Motor(5, "4310", norm_mode_body),
                 "wrist_3": Motor(6, "4310", norm_mode_body),
-                "gripper": Motor(7, "4310", MotorNormMode.RANGE_0_100), # 6 vs 7 actuators is an issue here!
+                "gripper": Motor(7, "4310", norm_mode_body),  # Required by Trossen driver (may be unplugged)
             },
             calibration=self.calibration,
             model=self.config.model,  # Use model from config
@@ -135,10 +137,13 @@ class WidowAIFollower(Robot):
         print("Calibration saved to", self.calibration_fpath)
 
     def configure(self) -> None:
-        with self.bus.torque_disabled():
-            self.bus.configure_motors()
-            # For Trossen arms, torque is enabled by default in position mode
-            # No need to set specific PID values as they're pre-configured
+        # For Trossen follower arms, use proper initialization sequence
+        # This moves to home position and keeps in position mode until teleoperation starts
+        self.bus.initialize_for_teleoperation(is_leader=False)
+        
+    def prepare_for_teleoperation(self) -> None:
+        """Set the robot to teleoperation mode after both arms are initialized."""
+        self.bus.set_teleoperation_mode(is_leader=False)
 
     def setup_motors(self) -> None:
         for motor in reversed(self.bus.motors):
@@ -194,6 +199,14 @@ class WidowAIFollower(Robot):
         # Send goal position to the arm
         self.bus.sync_write("Goal_Position", goal_pos)
         return {f"{motor}.pos": val for motor, val in goal_pos.items()}
+
+    def get_external_efforts(self) -> dict[str, float]:
+        """Get external efforts/forces from all motors for force feedback."""
+        if not self.is_connected:
+            raise DeviceNotConnectedError(f"{self} is not connected.")
+        
+        efforts_dict = self.bus.sync_read("External_Efforts", normalize=False)
+        return {f"{motor}.force": val for motor, val in efforts_dict.items()}
 
     def disconnect(self):
         if not self.is_connected:

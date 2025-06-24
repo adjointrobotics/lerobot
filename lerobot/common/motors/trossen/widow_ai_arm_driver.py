@@ -4,14 +4,14 @@ from copy import deepcopy
 from typing import Protocol
 
 import numpy as np
-import trossen_arm as trossen
+import trossen_arm as trossen_arm
 
 from ..motors_bus import Motor, MotorCalibration, MotorsBus, NameOrID, Value
 
 
 TROSSEN_ARM_MODELS = {
-    "V0_LEADER": [trossen.Model.wxai_v0, trossen.StandardEndEffector.wxai_v0_leader],
-    "V0_FOLLOWER": [trossen.Model.wxai_v0, trossen.StandardEndEffector.wxai_v0_follower],
+    "V0_LEADER": [trossen_arm.Model.wxai_v0, trossen_arm.StandardEndEffector.wxai_v0_leader],
+    "V0_FOLLOWER": [trossen_arm.Model.wxai_v0, trossen_arm.StandardEndEffector.wxai_v0_follower],
 }
 
 # Default motor configuration for Trossen arms
@@ -22,6 +22,7 @@ DEFAULT_TROSSEN_MOTORS = {
     "joint_3": Motor(id=4, model="4310", norm_mode="degrees"),
     "joint_4": Motor(id=5, model="4310", norm_mode="degrees"),
     "joint_5": Motor(id=6, model="4310", norm_mode="degrees"),
+    "gripper": Motor(id=7, model="4310", norm_mode="degrees"),  # Required by Trossen driver (may be unplugged)
 }
 
 # Control table for Trossen motors (simplified - using position control)
@@ -145,22 +146,33 @@ class TrossenArmDriver(MotorsBus):
         self.logs = {}
         self.fps = 30
         
+        # Track the current mode to ensure consistency
+        self._current_mode = None
+        
         # Attempt at dynamically creating home_pose based on number of motors
         num_motors = len(motors)
-        if num_motors == 7:
-            # Leader arm: 6 joints + 1 gripper
-            self.home_pose = [0, np.pi / 3, np.pi / 6, np.pi / 5, 0, 0, 0]
-        elif num_motors == 6:
-            # Follower arm: 6 joints only
-            self.home_pose = [0, np.pi / 3, np.pi / 6, np.pi / 5, 0, 0]
-        else:
-            # Fallback: create pose with zeros for any number of motors
-            self.home_pose = [0] * num_motors
-            
-        self.sleep_pose = [0] * num_motors
+        
+        # The Trossen driver always expects 7 positions, so we need to create a 7-element pose
+        # even if we only have 6 motors configured (when gripper is unplugged)
+        self.home_pose = [0.0, np.pi/2, np.pi/2, 0.0, 0.0, 0.0, 0.0]
+        self.sleep_pose = [0] * len(self.home_pose)
 
         # Minimum time to move for the arm
         self.MIN_TIME_TO_MOVE = 3.0 / self.fps
+
+    @property
+    def current_mode(self) -> str:
+        """Get the current mode as a string for debugging."""
+        if self._current_mode is None:
+            return "unknown"
+        elif self._current_mode == trossen_arm.Mode.position:
+            return "position"
+        elif self._current_mode == trossen_arm.Mode.external_effort:
+            return "external_effort"
+        elif self._current_mode == trossen_arm.Mode.velocity:
+            return "velocity"
+        else:
+            return f"unknown_mode_{self._current_mode}"
 
     @property
     def is_connected(self) -> bool:
@@ -185,17 +197,33 @@ class TrossenArmDriver(MotorsBus):
         model_number = self.model_number_table[self.motors[motor].model]
         return self.default_baudrate, motor_id
 
+    def _set_mode_safely(self, mode, mode_name: str = "unknown") -> None:
+        """Safely set the arm mode and track it."""
+        if not self.is_connected:
+            print(f"TrossenArmDriver({self.port}) is not connected. Cannot set mode.")
+            return
+            
+        try:
+            if self._current_mode != mode:
+                print(f"Setting {self.model} arm to {mode_name} mode")
+                self.driver.set_all_modes(mode)
+                self._current_mode = mode
+                print(f"Successfully set {self.model} arm to {mode_name} mode")
+        except Exception as e:
+            print(f"Warning: Failed to set {self.model} arm to {mode_name} mode: {e}")
+            # Don't update _current_mode if the operation failed
+
     def configure_motors(self) -> None:
         """Configure Trossen motors with recommended settings."""
-        # Trossen motors are pre-configured, but we can set some parameters
-        for motor_name in self.motors:
-            # Set torque enable to 1 (enabled)
-            self.write("Torque_Enable", motor_name, 1, normalize=False)
+        # The motors are pre-configured
+        # We just need to ensure they're in position mode and ready for operation
+        self._set_mode_safely(trossen_arm.Mode.position, "position")
 
     def disable_torque(self, motors: str | list[str] | None = None, num_retry: int = 0) -> None:
         """Disable torque on selected motors."""
-        for motor in self._get_motors_list(motors):
-            self.write("Torque_Enable", motor, 0, normalize=False)
+        # This allows the arm to be moved by hand (gravity compensation)
+        # DO NOT set external efforts to zero - this causes instability if there is no feedback
+        self._set_mode_safely(trossen_arm.Mode.external_effort, "external_effort")
 
     def _disable_torque(self, motor_id: int, model: str, num_retry: int = 0) -> None:
         """Disable torque on a specific motor by ID."""
@@ -204,8 +232,8 @@ class TrossenArmDriver(MotorsBus):
 
     def enable_torque(self, motors: str | list[str] | None = None, num_retry: int = 0) -> None:
         """Enable torque on selected motors."""
-        for motor in self._get_motors_list(motors):
-            self.write("Torque_Enable", motor, 1, normalize=False)
+        # For Trossen arms, enable torque by setting to position mode
+        self._set_mode_safely(trossen_arm.Mode.position, "position")
 
     @property
     def is_calibrated(self) -> bool:
@@ -292,7 +320,7 @@ class TrossenArmDriver(MotorsBus):
         print(f"Connecting to {self.model} arm at {self.port}...")
 
         # Initialize the driver
-        self.driver = trossen.TrossenArmDriver()
+        self.driver = trossen_arm.TrossenArmDriver()
 
         # Get the model configuration
         try:
@@ -302,17 +330,16 @@ class TrossenArmDriver(MotorsBus):
 
         print("Configuring the drivers...")
 
+        # Ensure the driver is ready
+        time.sleep(2.0)
+
         # Configure the driver
         try:
-            self.driver.configure(model_name, model_end_effector, self.port, True)
-        except Exception:
+            self.driver.configure(model_name, model_end_effector, self.port, False)
+        except Exception as e:
             traceback.print_exc()
             print(f"Failed to configure the driver for the {self.model} arm at {self.port}.")
-            raise
-
-        # Move the arms to the home pose
-        self.driver.set_all_modes(trossen.Mode.position)
-        self.driver.set_all_positions(self.home_pose, 2.0, False)
+            raise e
 
         # Mark as connected
         self._is_connected = True
@@ -324,7 +351,7 @@ class TrossenArmDriver(MotorsBus):
         except KeyError as e:
             raise ValueError(f"Unsupported model: {self.model}") from e
         try:
-            self.driver.configure(model_name, model_end_effector, self.port, True)
+            self.driver.configure(model_name, model_end_effector, self.port, False)
         except Exception as e:
             traceback.print_exc()
             print(f"Failed to configure the driver for the {self.model} arm at {self.port}.")
@@ -346,7 +373,7 @@ class TrossenArmDriver(MotorsBus):
             values = self.driver.get_all_positions()
             # Return the specific motor's position
             motor_id = self.motors[motor].id
-            motor_index = motor_id - 1  # Assuming IDs start at 1
+            motor_index = motor_id - 1
             if motor_index < len(values):
                 value = values[motor_index]
             else:
@@ -396,22 +423,22 @@ class TrossenArmDriver(MotorsBus):
             if motor_index < len(current_positions):
                 current_positions[motor_index] = value
                 self.driver.set_all_positions(current_positions, self.MIN_TIME_TO_MOVE, False)
-
-        # Enable or disable the torque of the motors
         elif data_name == "Torque_Enable":
             # Set the arms to POSITION mode
             if value == 1:
-                self.driver.set_all_modes(trossen.Mode.position)
+                self._set_mode_safely(trossen_arm.Mode.position, "position")
             else:
-                self.driver.set_all_modes(trossen.Mode.external_effort)
-                self.driver.set_all_external_efforts([0.0] * self.driver.get_num_joints(), 0.0, True)
+                # Disable torque by setting to external effort mode (gravity compensation)
+                # DO NOT set external efforts to zero - this causes instability 
+                self._set_mode_safely(trossen_arm.Mode.external_effort, "external_effort")
         elif data_name == "Reset":
-            self.driver.set_all_modes(trossen.Mode.velocity)
+            # Reset by setting to velocity mode, then position mode, then home pose
+            self.driver.set_all_modes(trossen_arm.Mode.velocity)
             self.driver.set_all_velocities([0.0] * self.driver.get_num_joints(), 0.0, False)
-            self.driver.set_all_modes(trossen.Mode.position)
+            self.driver.set_all_modes(trossen_arm.Mode.position)
             self.driver.set_all_positions(self.home_pose, 2.0, False)
         elif data_name == "External_Efforts":
-            # For Trossen, we need to set all efforts at once
+            # Set external efforts for all joints
             current_efforts = self.driver.get_all_external_efforts()
             motor_id = self.motors[motor].id
             motor_index = motor_id - 1
@@ -446,6 +473,17 @@ class TrossenArmDriver(MotorsBus):
                     result[motor] = value
                 else:
                     result[motor] = 0.0
+        elif data_name == "External_Efforts":
+            # Get all external efforts at once
+            all_efforts = self.driver.get_all_external_efforts()
+            
+            for motor in motors_list:
+                motor_id = self.motors[motor].id
+                motor_index = motor_id - 1
+                if motor_index < len(all_efforts):
+                    result[motor] = all_efforts[motor_index]
+                else:
+                    result[motor] = 0.0
         else:
             # Fall back to individual reads for other data types
             for motor in motors_list:
@@ -478,8 +516,8 @@ class TrossenArmDriver(MotorsBus):
                     values = np.radians(values)
                 current_positions = [values] * len(current_positions)
             
-            # Set all positions at once
-            self.driver.set_all_positions(current_positions, self.MIN_TIME_TO_MOVE, False)
+            velocity_array = [0.0] * self.driver.get_num_joints()
+            self.driver.set_all_positions(current_positions, 0.0, False, velocity_array)
         else:
             # Fall back to individual writes for other data types
             if isinstance(values, dict):
@@ -496,15 +534,83 @@ class TrossenArmDriver(MotorsBus):
             return
 
         if disable_torque:
-            self.driver.set_all_modes(trossen.Mode.velocity)
-            self.driver.set_all_velocities([0.0] * self.driver.get_num_joints(), 0.0, False)
-            self.driver.set_all_modes(trossen.Mode.position)
-            self.driver.set_all_positions(self.home_pose, 2.0, True)
-            self.driver.set_all_positions(self.sleep_pose, 2.0, False)
+            try:
+                # Move to home pose
+                self._set_mode_safely(trossen_arm.Mode.position, "position")
+                self.driver.set_all_positions(self.home_pose, 2.0, True)
+                
+                # Move to sleep pose
+                self.driver.set_all_positions(self.sleep_pose, 2.0, False)
+            except Exception as e:
+                print(f"Warning: Disconnect operations failed: {e}")
 
         self._is_connected = False
 
     def __del__(self):
         """Cleanup when the object is destroyed."""
-        if getattr(self, "_is_connected", False):
-            self.disconnect()
+        try:
+            if getattr(self, "_is_connected", False):
+                self.disconnect()
+        except Exception as e:
+            print(f"Warning: Exception during cleanup: {e}")
+
+    def initialize_for_teleoperation(self, is_leader: bool = True) -> None:
+        """Initialize the arm for teleoperation following the Trossen demo pattern EXACTLY."""
+        import trossen_arm
+        import numpy as np
+        
+        print(f"Initializing {self.model} arm for teleoperation...")
+        
+        home_pose = np.array([0.0, np.pi/2, np.pi/2, 0.0, 0.0, 0.0, 0.0])
+        
+        print(f"Moving {self.model} arm to home position...")
+        
+        self._set_mode_safely(trossen_arm.Mode.position, "position")
+        
+        try:
+            zero_velocities = [0.0] * self.driver.get_num_joints()
+            self.driver.set_all_positions(home_pose, 2.0, True, zero_velocities)
+            print(f"Successfully moved {self.model} arm to home position")
+        except Exception as e:
+            print(f"ERROR: Failed to move {self.model} arm to home position: {e}")
+            print(f"Trying emergency reset sequence for {self.model} arm...")
+            try:
+                self.driver.set_all_modes(trossen_arm.Mode.velocity)
+                self.driver.set_all_velocities([0.0] * self.driver.get_num_joints(), 0.0, False)
+                time.sleep(0.5)
+                self.driver.set_all_modes(trossen_arm.Mode.position)
+                self.driver.set_all_positions(home_pose, 3.0, True)
+                print(f"Emergency reset successful for {self.model} arm")
+            except Exception as e2:
+                print(f"Emergency reset also failed for {self.model} arm: {e2}")
+                raise e2
+        
+        print(f"Waiting 1 second for {self.model} arm to settle...")
+        time.sleep(1.0)
+        
+        # DON'T set the final teleoperation modes here - that should be done
+        # only when BOTH arms are ready to start the teleoperation loop
+        # Keep both arms in position mode for now
+        print(f"Keeping {self.model} arm in position mode until teleoperation starts...")
+        self._set_mode_safely(trossen_arm.Mode.position, "position")
+            
+        print(f"{self.model} arm initialization complete!")
+
+    def set_teleoperation_mode(self, is_leader: bool = True) -> None:
+        """Set the appropriate mode for teleoperation after both arms are initialized."""
+        if is_leader:
+            print(f"Setting {self.model} arm to external effort mode for teleoperation...")
+            self._set_mode_safely(trossen_arm.Mode.external_effort, "external_effort")
+            
+            # CRITICAL: Send zero forces immediately to prevent instability
+            # The leader needs active force control to remain stable in external effort mode
+            print(f"Sending zero forces to {self.model} arm for stability...")
+            try:
+                zero_forces = [0.0] * self.driver.get_num_joints()
+                self.driver.set_all_external_efforts(zero_forces, 0.0, False)
+                print(f"Zero forces sent to {self.model} arm - should be stable now")
+            except Exception as e:
+                print(f"WARNING: Failed to send zero forces to {self.model} arm: {e}")
+        else:
+            print(f"Setting {self.model} arm to position mode for teleoperation...")
+            self._set_mode_safely(trossen_arm.Mode.position, "position")

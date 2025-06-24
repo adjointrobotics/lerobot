@@ -50,7 +50,7 @@ class WidowAILeader(Teleoperator):
                 "wrist_1": Motor(4, "4310", MotorNormMode.DEGREES),
                 "wrist_2": Motor(5, "4310", MotorNormMode.DEGREES),
                 "wrist_3": Motor(6, "4310", MotorNormMode.DEGREES),
-                "gripper": Motor(7, "4310", MotorNormMode.RANGE_0_100),
+                "gripper": Motor(7, "4310", MotorNormMode.DEGREES),
             },
             calibration=self.calibration,
             model=self.config.model,
@@ -114,9 +114,13 @@ class WidowAILeader(Teleoperator):
         logger.info(f"Calibration saved to {self.calibration_fpath}")
 
     def configure(self) -> None:
-        # For Trossen arms, torque is enabled by default in position mode
-        # No need to set specific PID values as they're pre-configured
-        self.bus.configure_motors()
+        # For Trossen leader arms, use proper initialization sequence
+        # This moves to home position and keeps in position mode until teleoperation starts
+        self.bus.initialize_for_teleoperation(is_leader=True)
+        
+    def prepare_for_teleoperation(self) -> None:
+        """Set the teleoperator to teleoperation mode after both arms are initialized."""
+        self.bus.set_teleoperation_mode(is_leader=True)
 
     def setup_motors(self) -> None:
         for motor in reversed(self.bus.motors):
