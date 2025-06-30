@@ -27,3 +27,6 @@ class WidowAILeaderConfig(TeleoperatorConfig):
     
     # Trossen arm model to use
     model: str = "V0_LEADER"
+    
+    # Force feedback gain for haptic feedback
+    force_feedback_gain: float = 0.1

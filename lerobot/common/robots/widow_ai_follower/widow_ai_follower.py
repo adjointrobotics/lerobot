@@ -19,11 +19,8 @@ import time
 from functools import cached_property
 from typing import Any
 
-import trossen_arm
-
 from lerobot.common.cameras.utils import make_cameras_from_configs
 from lerobot.common.errors import DeviceAlreadyConnectedError, DeviceNotConnectedError
-from lerobot.common.motors import Motor, MotorCalibration, MotorNormMode
 from lerobot.common.motors.trossen import TrossenArmDriver
 
 from ..robot import Robot
@@ -44,28 +41,24 @@ class WidowAIFollower(Robot):
     def __init__(self, config: WidowAIFollowerConfig):
         super().__init__(config)
         self.config = config
-        norm_mode_body = MotorNormMode.DEGREES if config.use_degrees else MotorNormMode.RANGE_M100_100
         
-        # Use TrossenArmDriver instead of DynamixelMotorsBus
+        # Use simplified TrossenArmDriver
         self.bus = TrossenArmDriver(
             port=self.config.port,
-            motors={
-                "shoulder_pan": Motor(1, "4340", norm_mode_body),
-                "shoulder_lift": Motor(2, "4340", norm_mode_body),
-                "elbow_flex": Motor(3, "4340", norm_mode_body),
-                "wrist_1": Motor(4, "4310", norm_mode_body),
-                "wrist_2": Motor(5, "4310", norm_mode_body),
-                "wrist_3": Motor(6, "4310", norm_mode_body),
-                "gripper": Motor(7, "4310", norm_mode_body),  # Required by Trossen driver (may be unplugged)
-            },
-            calibration=self.calibration,
-            model=self.config.model,  # Use model from config
+            model=self.config.model,
         )
+        
+        self.motor_names = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_1", "wrist_2", "wrist_3", "gripper"]
+        
         self.cameras = make_cameras_from_configs(config.cameras)
 
     @property
     def _motors_ft(self) -> dict[str, type]:
-        return {f"{motor}.pos": float for motor in self.bus.motors}
+        return {f"{motor}.pos": float for motor in self.motor_names}
+
+    @property
+    def _forces_ft(self) -> dict[str, type]:
+        return {f"{motor}.force": float for motor in self.motor_names}
 
     @property
     def _cameras_ft(self) -> dict[str, tuple]:
@@ -75,7 +68,7 @@ class WidowAIFollower(Robot):
 
     @cached_property
     def observation_features(self) -> dict[str, type | tuple]:
-        return {**self._motors_ft, **self._cameras_ft}
+        return {**self._motors_ft, **self._forces_ft, **self._cameras_ft}
 
     @cached_property
     def action_features(self) -> dict[str, type]:
@@ -94,9 +87,7 @@ class WidowAIFollower(Robot):
             raise DeviceAlreadyConnectedError(f"{self} already connected")
 
         self.bus.connect()
-        if not self.is_calibrated and calibrate:
-            self.calibrate()
-
+        
         for cam in self.cameras.values():
             cam.connect()
 
@@ -105,51 +96,24 @@ class WidowAIFollower(Robot):
 
     @property
     def is_calibrated(self) -> bool:
-        return self.bus.is_calibrated
+        # Trossen arms are pre-calibrated
+        return True
 
     def calibrate(self) -> None:
-        logger.info(f"\nRunning calibration of {self}")
-        # For Trossen arms, calibration is typically pre-configured
-        # but we can still set up homing offsets if needed
-        self.bus.disable_torque()
-        
-        input(f"Move {self} to the middle of its range of motion and press ENTER....")
-        homing_offsets = self.bus.set_half_turn_homings()
-
-        print(
-            "Move all joints sequentially through their entire ranges "
-            "of motion.\nRecording positions. Press ENTER to stop..."
-        )
-        range_mins, range_maxes = self.bus.record_ranges_of_motion()
-
-        self.calibration = {}
-        for motor, m in self.bus.motors.items():
-            self.calibration[motor] = MotorCalibration(
-                id=m.id,
-                drive_mode=0,
-                homing_offset=homing_offsets[motor],
-                range_min=range_mins[motor],
-                range_max=range_maxes[motor],
-            )
-
-        self.bus.write_calibration(self.calibration)
-        self._save_calibration()
-        print("Calibration saved to", self.calibration_fpath)
+        # Trossen arms don't need calibration
+        logger.info(f"{self} is pre-calibrated, no calibration needed.")
 
     def configure(self) -> None:
-        # For Trossen follower arms, use proper initialization sequence
-        # This moves to home position and keeps in position mode until teleoperation starts
         self.bus.initialize_for_teleoperation(is_leader=False)
-        
+        self.bus.set_teleoperation_mode(is_leader=False)
+
     def prepare_for_teleoperation(self) -> None:
         """Set the robot to teleoperation mode after both arms are initialized."""
         self.bus.set_teleoperation_mode(is_leader=False)
 
     def setup_motors(self) -> None:
-        for motor in reversed(self.bus.motors):
-            input(f"Connect the controller board to the '{motor}' motor only and press enter.")
-            self.bus.setup_motor(motor)
-            print(f"'{motor}' motor id set to {self.bus.motors[motor].id}")
+        # Trossen arms don't need motor setup
+        logger.info(f"{self} motors are pre-configured.")
 
     def get_observation(self) -> dict[str, Any]:
         if not self.is_connected:
@@ -157,10 +121,36 @@ class WidowAIFollower(Robot):
 
         # Read arm position
         start = time.perf_counter()
-        obs_dict = self.bus.sync_read("Present_Position")
-        obs_dict = {f"{motor}.pos": val for motor, val in obs_dict.items()}
+        positions = self.bus.read("Present_Position")
+        
+        # Convert numpy array to dict with motor names
+        obs_dict = {}
+        for i, motor in enumerate(self.motor_names):
+            if i < len(positions):
+                obs_dict[f"{motor}.pos"] = float(positions[i])
+            else:
+                obs_dict[f"{motor}.pos"] = 0.0
+                
         dt_ms = (time.perf_counter() - start) * 1e3
         logger.debug(f"{self} read state: {dt_ms:.1f}ms")
+
+        # Read external efforts for force feedback
+        try:
+            start = time.perf_counter()
+            efforts = self.bus.read("External_Efforts")
+            dt_ms = (time.perf_counter() - start) * 1e3
+            logger.debug(f"{self} read external efforts: {dt_ms:.1f}ms")
+            
+            # Convert numpy array to dict with motor names
+            for i, motor in enumerate(self.motor_names):
+                if i < len(efforts):
+                    obs_dict[f"{motor}.force"] = float(efforts[i])
+                else:
+                    obs_dict[f"{motor}.force"] = 0.0
+        except Exception as e:
+            logger.debug(f"{self} failed to read external efforts, using zeros: {e}")
+            for motor in self.motor_names:
+                obs_dict[f"{motor}.force"] = 0.0
 
         # Capture images from cameras
         for cam_key, cam in self.cameras.items():
@@ -174,10 +164,6 @@ class WidowAIFollower(Robot):
     def send_action(self, action: dict[str, Any]) -> dict[str, Any]:
         """Command arm to move to a target joint configuration.
 
-        The relative action magnitude may be clipped depending on the configuration parameter
-        `max_relative_target`. In this case, the action sent differs from original action.
-        Thus, this function always returns the action actually sent.
-
         Raises:
             RobotDeviceNotConnectedError: if robot is not connected.
 
@@ -187,32 +173,37 @@ class WidowAIFollower(Robot):
         if not self.is_connected:
             raise DeviceNotConnectedError(f"{self} is not connected.")
 
-        goal_pos = {key.removesuffix(".pos"): val for key, val in action.items() if key.endswith(".pos")}
+        start = time.perf_counter()
+        
+        # Extract goal positions from action dict
+        goal_pos = []
+        for motor in self.motor_names:
+            pos_key = f"{motor}.pos"
+            if pos_key in action:
+                goal_pos.append(action[pos_key])
+            else:
+                goal_pos.append(0.0)
 
         # Cap goal position when too far away from present position.
-        # /!\ Slower fps expected due to reading from the follower.
         if self.config.max_relative_target is not None:
-            present_pos = self.bus.sync_read("Present_Position")
-            goal_present_pos = {key: (g_pos, present_pos[key]) for key, g_pos in goal_pos.items()}
-            goal_pos = ensure_safe_goal_position(goal_present_pos, self.config.max_relative_target)
+            present_pos = self.bus.read("Present_Position")
+            present_dict = {motor: float(present_pos[i]) for i, motor in enumerate(self.motor_names) if i < len(present_pos)}
+            goal_dict = {motor: goal_pos[i] for i, motor in enumerate(self.motor_names)}
+            goal_present_pos = {key: (goal_dict[key], present_dict.get(key, 0.0)) for key in goal_dict}
+            safe_goal_dict = ensure_safe_goal_position(goal_present_pos, self.config.max_relative_target)
+            goal_pos = [safe_goal_dict.get(motor, 0.0) for motor in self.motor_names]
 
-        # Send goal position to the arm
-        self.bus.sync_write("Goal_Position", goal_pos)
-        return {f"{motor}.pos": val for motor, val in goal_pos.items()}
-
-    def get_external_efforts(self) -> dict[str, float]:
-        """Get external efforts/forces from all motors for force feedback."""
-        if not self.is_connected:
-            raise DeviceNotConnectedError(f"{self} is not connected.")
+        self.bus.write("Goal_Position", goal_pos)
         
-        efforts_dict = self.bus.sync_read("External_Efforts", normalize=False)
-        return {f"{motor}.force": val for motor, val in efforts_dict.items()}
+        dt_ms = (time.perf_counter() - start) * 1e3
+        
+        return {f"{motor}.pos": val for motor, val in zip(self.motor_names, goal_pos)}
 
     def disconnect(self):
         if not self.is_connected:
             raise DeviceNotConnectedError(f"{self} is not connected.")
 
-        self.bus.disconnect(self.config.disable_torque_on_disconnect)
+        self.bus.disconnect()
         for cam in self.cameras.values():
             cam.disconnect()
 
