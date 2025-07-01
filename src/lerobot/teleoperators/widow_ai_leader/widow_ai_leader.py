@@ -17,8 +17,8 @@
 import logging
 import time
 
-from lerobot.common.errors import DeviceAlreadyConnectedError, DeviceNotConnectedError
-from lerobot.common.motors.trossen import TrossenArmDriver
+from lerobot.errors import DeviceAlreadyConnectedError, DeviceNotConnectedError
+from lerobot.motors.trossen import TrossenArmDriver
 
 from ..teleoperator import Teleoperator
 from .config_widow_ai_leader import WidowAILeaderConfig

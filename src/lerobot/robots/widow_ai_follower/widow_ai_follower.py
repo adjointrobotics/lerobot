@@ -19,9 +19,9 @@ import time
 from functools import cached_property
 from typing import Any
 
-from lerobot.common.cameras.utils import make_cameras_from_configs
-from lerobot.common.errors import DeviceAlreadyConnectedError, DeviceNotConnectedError
-from lerobot.common.motors.trossen import TrossenArmDriver
+from lerobot.cameras.utils import make_cameras_from_configs
+from lerobot.errors import DeviceAlreadyConnectedError, DeviceNotConnectedError
+from lerobot.motors.trossen import TrossenArmDriver
 
 from ..robot import Robot
 from ..utils import ensure_safe_goal_position
