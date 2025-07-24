@@ -1,4 +1,6 @@
-# Copyright 2024 The HuggingFace Inc. team. All rights reserved.
+#!/usr/bin/env python
+
+# Copyright 2025 The HuggingFace Inc. team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -43,6 +45,14 @@ class SO100FollowerConfig(RobotConfig):
 @dataclass
 class SO100FollowerEndEffectorConfig(SO100FollowerConfig):
     """Configuration for the SO100FollowerEndEffector robot."""
+
+    # Path to URDF file for kinematics
+    # NOTE: It is highly recommended to use the urdf in the SO-ARM100 repo:
+    # https://github.com/TheRobotStudio/SO-ARM100/blob/main/Simulation/SO101/so101_new_calib.urdf
+    urdf_path: str | None = None
+
+    # End-effector frame name in the URDF
+    target_frame_name: str = "gripper_frame_link"
 
     # Default bounds for the end-effector position (in meters)
     end_effector_bounds: dict[str, list[float]] = field(

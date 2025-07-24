@@ -53,6 +53,18 @@ def make_robot_from_config(config: RobotConfig) -> Robot:
         from .widow_ai_follower import WidowAIFollower
 
         return WidowAIFollower(config)
+    elif config.type == "hope_jr_hand":
+        from .hope_jr import HopeJrHand
+
+        return HopeJrHand(config)
+    elif config.type == "hope_jr_arm":
+        from .hope_jr import HopeJrArm
+
+        return HopeJrArm(config)
+    elif config.type == "bi_so100_follower":
+        from .bi_so100_follower import BiSO100Follower
+
+        return BiSO100Follower(config)
     elif config.type == "mock_robot":
         from tests.mocks.mock_robot import MockRobot
 

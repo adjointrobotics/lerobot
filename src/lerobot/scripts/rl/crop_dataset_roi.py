@@ -18,11 +18,9 @@ import argparse
 import json
 from copy import deepcopy
 from pathlib import Path
-from typing import Dict, Tuple
 
 import cv2
-
-# import torch.nn.functional as F  # noqa: N812
+import torch
 import torchvision.transforms.functional as F  # type: ignore  # noqa: N812
 from tqdm import tqdm  # type: ignore
 
@@ -163,10 +161,10 @@ def get_image_from_lerobot_dataset(dataset: LeRobotDataset):
 
 def convert_lerobot_dataset_to_cropper_lerobot_dataset(
     original_dataset: LeRobotDataset,
-    crop_params_dict: Dict[str, Tuple[int, int, int, int]],
+    crop_params_dict: dict[str, tuple[int, int, int, int]],
     new_repo_id: str,
     new_dataset_root: str,
-    resize_size: Tuple[int, int] = (128, 128),
+    resize_size: tuple[int, int] = (128, 128),
     push_to_hub: bool = False,
     task: str = "",
 ) -> LeRobotDataset:
@@ -224,7 +222,8 @@ def convert_lerobot_dataset_to_cropper_lerobot_dataset(
                 cropped = F.crop(value, top, left, height, width)
                 value = F.resize(cropped, resize_size)
                 value = value.clamp(0, 1)
-
+            if key.startswith("complementary_info") and isinstance(value, torch.Tensor) and value.dim() == 0:
+                value = value.unsqueeze(0)
             new_frame[key] = value
 
         new_dataset.add_frame(new_frame, task=task)
@@ -265,8 +264,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--push-to-hub",
-        type=bool,
-        default=False,
+        action="store_true",
         help="Whether to push the new dataset to the hub.",
     )
     parser.add_argument(

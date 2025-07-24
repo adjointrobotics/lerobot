@@ -18,12 +18,10 @@ import base64
 import json
 import logging
 from functools import cached_property
-from typing import Any, Dict, Optional, Tuple
+from typing import Any
 
 import cv2
 import numpy as np
-import torch
-import zmq
 
 from lerobot.errors import DeviceAlreadyConnectedError, DeviceNotConnectedError
 
@@ -36,6 +34,9 @@ class LeKiwiClient(Robot):
     name = "lekiwi_client"
 
     def __init__(self, config: LeKiwiClientConfig):
+        import zmq
+
+        self._zmq = zmq
         super().__init__(config)
         self.config = config
         self.id = config.id
@@ -118,6 +119,7 @@ class LeKiwiClient(Robot):
                 "LeKiwi Daemon is already connected. Do not run `robot.connect()` twice."
             )
 
+        zmq = self._zmq
         self.zmq_context = zmq.Context()
         self.zmq_cmd_socket = self.zmq_context.socket(zmq.PUSH)
         zmq_cmd_locator = f"tcp://{self.remote_ip}:{self.port_zmq_cmd}"
@@ -140,8 +142,9 @@ class LeKiwiClient(Robot):
     def calibrate(self) -> None:
         pass
 
-    def _poll_and_get_latest_message(self) -> Optional[str]:
+    def _poll_and_get_latest_message(self) -> str | None:
         """Polls the ZMQ socket for a limited time and returns the latest message string."""
+        zmq = self._zmq
         poller = zmq.Poller()
         poller.register(self.zmq_observation_socket, zmq.POLLIN)
 
@@ -168,7 +171,7 @@ class LeKiwiClient(Robot):
 
         return last_msg
 
-    def _parse_observation_json(self, obs_string: str) -> Optional[Dict[str, Any]]:
+    def _parse_observation_json(self, obs_string: str) -> dict[str, Any] | None:
         """Parses the JSON observation string."""
         try:
             return json.loads(obs_string)
@@ -176,7 +179,7 @@ class LeKiwiClient(Robot):
             logging.error(f"Error decoding JSON observation: {e}")
             return None
 
-    def _decode_image_from_b64(self, image_b64: str) -> Optional[np.ndarray]:
+    def _decode_image_from_b64(self, image_b64: str) -> np.ndarray | None:
         """Decodes a base64 encoded image string to an OpenCV image."""
         if not image_b64:
             return None
@@ -192,31 +195,28 @@ class LeKiwiClient(Robot):
             return None
 
     def _remote_state_from_obs(
-        self, observation: Dict[str, Any]
-    ) -> Tuple[Dict[str, np.ndarray], Dict[str, Any]]:
+        self, observation: dict[str, Any]
+    ) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
         """Extracts frames, and state from the parsed observation."""
-        flat_state = {key: value for key, value in observation.items() if key in self._state_ft}
 
-        state_vec = np.array(
-            [flat_state.get(k, 0.0) for k in self._state_order],
-            dtype=np.float32,
-        )
+        flat_state = {key: observation.get(key, 0.0) for key in self._state_order}
+
+        state_vec = np.array([flat_state[key] for key in self._state_order], dtype=np.float32)
+
+        obs_dict: dict[str, Any] = {**flat_state, "observation.state": state_vec}
 
         # Decode images
-        image_observation = {
-            f"observation.images.{key}": value
-            for key, value in observation.items()
-            if key in self._cameras_ft
-        }
-        current_frames: Dict[str, np.ndarray] = {}
-        for cam_name, image_b64 in image_observation.items():
+        current_frames: dict[str, np.ndarray] = {}
+        for cam_name, image_b64 in observation.items():
+            if cam_name not in self._cameras_ft:
+                continue
             frame = self._decode_image_from_b64(image_b64)
             if frame is not None:
                 current_frames[cam_name] = frame
 
-        return current_frames, {"observation.state": state_vec}
+        return current_frames, obs_dict
 
-    def _get_data(self) -> Tuple[Dict[str, np.ndarray], Dict[str, Any], Dict[str, Any]]:
+    def _get_data(self) -> tuple[dict[str, np.ndarray], dict[str, Any], dict[str, Any]]:
         """
         Polls the video socket for the latest observation data.
 
@@ -267,7 +267,7 @@ class LeKiwiClient(Robot):
             if frame is None:
                 logging.warning("Frame is None")
                 frame = np.zeros((640, 480, 3), dtype=np.uint8)
-            obs_dict[cam_name] = torch.from_numpy(frame)
+            obs_dict[cam_name] = frame
 
         return obs_dict
 
@@ -327,7 +327,10 @@ class LeKiwiClient(Robot):
 
         # TODO(Steven): Remove the np conversion when it is possible to record a non-numpy array value
         actions = np.array([action.get(k, 0.0) for k in self._state_order], dtype=np.float32)
-        return {"action": actions}
+
+        action_sent = {key: actions[i] for i, key in enumerate(self._state_order)}
+        action_sent["action"] = actions
+        return action_sent
 
     def disconnect(self):
         """Cleans ZMQ comms"""
