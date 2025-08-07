@@ -222,7 +222,14 @@ class PaliGemmaWithExpertModel(PreTrainedModel):
             return self.paligemma.model.get_image_features(image)
 
     def embed_language_tokens(self, tokens: torch.Tensor):
-        return self.paligemma.language_model.embed_tokens(tokens)
+        # Handle different transformers versions - some have .model.embed_tokens, others just .embed_tokens
+        if hasattr(self.paligemma.language_model, "model") and hasattr(self.paligemma.language_model.model, "embed_tokens"):
+            return self.paligemma.language_model.model.embed_tokens(tokens)
+        elif hasattr(self.paligemma.language_model, "embed_tokens"):
+            return self.paligemma.language_model.embed_tokens(tokens)
+        else:
+            # Fallback: try to find embed_tokens elsewhere
+            raise AttributeError(f"Cannot find embed_tokens in {type(self.paligemma.language_model)}. Available attributes: {dir(self.paligemma.language_model)}")
 
     # TODO: break down this huge forward into modules or functions
     def forward(
