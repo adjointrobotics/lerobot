@@ -54,6 +54,30 @@ class TrossenArmDriver:
         except KeyError as e:
             raise ValueError(f"Unsupported model: {self.model}") from e
 
+    def _reduce_velocity_limits(self, amount: float = 0.4) -> None:
+        """Reduce joint velocity limits by a given amount for safety.
+        The trossen_driver will throw a fault if the velocity limit is exceeded.
+        """
+        try:
+            print(f"Reducing {self.model} arm velocity limits by {amount * 100}% for safety...")
+            
+            # Get current joint limits
+            joint_limits = self.driver.get_joint_limits()
+            
+            # Reduce velocity max by amount (multiply by 1 - amount to keep amount% of original)
+            for i in range(len(joint_limits)):
+                original_velocity = joint_limits[i].velocity_max
+                joint_limits[i].velocity_max *= (1 - amount)
+                print(f"  Joint {i}: velocity_max reduced from {original_velocity:.3f} to {joint_limits[i].velocity_max:.3f}")
+            
+            # Set the new joint limits back to the driver
+            self.driver.set_joint_limits(joint_limits)
+            print(f"{self.model} arm velocity limits successfully reduced.")
+            
+        except Exception as e:
+            print(f"WARNING: Failed to reduce velocity limits for {self.model} arm: {e}")
+            # Don't raise - this is a safety enhancement, not critical for operation
+
     def connect(self) -> None:
         """Connect to the Trossen arm."""
         if self.is_connected:
@@ -83,6 +107,8 @@ class TrossenArmDriver:
 
         # Mark as connected
         self.is_connected = True
+        
+        self._reduce_velocity_limits()
 
     def disconnect(self) -> None:
         """Disconnect from the Trossen arm."""
