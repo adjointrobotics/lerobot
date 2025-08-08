@@ -16,8 +16,10 @@ import logging
 import logging.handlers
 import os
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from queue import Queue
 
 import torch
 
@@ -54,15 +56,6 @@ def visualize_action_queue_size(action_queue_size: list[int]) -> None:
     ax.grid(True, alpha=0.3)
     ax.plot(range(len(action_queue_size)), action_queue_size)
     plt.show()
-
-
-def validate_robot_cameras_for_policy(
-    lerobot_observation_features: dict[str, dict], policy_image_features: dict[str, PolicyFeature]
-) -> None:
-    image_keys = list(filter(is_image_key, lerobot_observation_features))
-    assert set(image_keys) == set(policy_image_features.keys()), (
-        f"Policy image features must match robot cameras! Received {list(policy_image_features.keys())} != {image_keys}"
-    )
 
 
 def map_robot_keys_to_lerobot_features(robot: Robot) -> dict[str, dict]:
@@ -203,19 +196,13 @@ def get_logger(name: str, log_to_file: bool = True) -> logging.Logger:
 
 @dataclass
 class TimedData:
-    """A data object with timestamp and timestep information.
+    """A data object with timestep information.
 
     Args:
-        timestamp: Unix timestamp relative to data's creation.
-        data: The actual data to wrap a timestamp around.
         timestep: The timestep of the data.
     """
 
-    timestamp: float
     timestep: int
-
-    def get_timestamp(self):
-        return self.timestamp
 
     def get_timestep(self):
         return self.timestep
@@ -232,69 +219,48 @@ class TimedAction(TimedData):
 @dataclass
 class TimedObservation(TimedData):
     observation: RawObservation
-    must_go: bool = False
+    inference_latency_steps: int
 
     def get_observation(self):
         return self.observation
 
-
-@dataclass
-class FPSTracker:
-    """Utility class to track FPS metrics over time."""
-
-    target_fps: float
-    first_timestamp: float = None
-    total_obs_count: int = 0
-
-    def calculate_fps_metrics(self, current_timestamp: float) -> dict[str, float]:
-        """Calculate average FPS vs target"""
-        self.total_obs_count += 1
-
-        # Initialize first observation time
-        if self.first_timestamp is None:
-            self.first_timestamp = current_timestamp
-
-        # Calculate overall average FPS (since start)
-        total_duration = current_timestamp - self.first_timestamp
-        avg_fps = (self.total_obs_count - 1) / total_duration if total_duration > 1e-6 else 0.0
-
-        return {"avg_fps": avg_fps, "target_fps": self.target_fps}
-
-    def reset(self):
-        """Reset the FPS tracker state"""
-        self.first_timestamp = None
-        self.total_obs_count = 0
+    def get_inference_latency_steps(self):
+        return self.inference_latency_steps
 
 
 @dataclass
 class RemotePolicyConfig:
-    policy_type: str
-    pretrained_name_or_path: str
+    server_args: dict[str, list[str]]
     lerobot_features: dict[str, PolicyFeature]
     actions_per_chunk: int
-    device: str = "cpu"
 
 
-def _compare_observation_states(obs1_state: torch.Tensor, obs2_state: torch.Tensor, atol: float) -> bool:
-    """Check if two observation states are similar, under a tolerance threshold"""
-    return bool(torch.linalg.norm(obs1_state - obs2_state) < atol)
+def aggregate_actions(
+    current_queue: Queue[TimedAction],
+    latest_action_timestep: int,
+    incoming_actions: list[TimedAction],
+    aggregate_fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
+) -> Queue[TimedAction]:
+    future_action_queue: Queue[TimedAction] = Queue()
 
+    current_action_queue = {action.get_timestep(): action.get_action() for action in current_queue.queue}
 
-def observations_similar(
-    obs1: TimedObservation, obs2: TimedObservation, lerobot_features: dict[str, dict], atol: float = 1
-) -> bool:
-    """Check if two observations are similar, under a tolerance threshold. Measures distance between
-    observations as the difference in joint-space between the two observations.
+    for new_action in incoming_actions:
+        # Skip actions that are older than the latest action
+        if new_action.get_timestep() <= latest_action_timestep:
+            continue
 
-    NOTE(fracapuano): This is a very simple check, and it is enough for the current use case.
-    An immediate next step is to use (fast) perceptual difference metrics comparing some camera views,
-    to surpass this joint-space similarity check.
-    """
-    obs1_state = extract_state_from_raw_observation(
-        make_lerobot_observation(obs1.get_observation(), lerobot_features)
-    )
-    obs2_state = extract_state_from_raw_observation(
-        make_lerobot_observation(obs2.get_observation(), lerobot_features)
-    )
+        if new_action.get_timestep() not in current_action_queue:
+            future_action_queue.put(new_action)
+            continue
 
-    return _compare_observation_states(obs1_state, obs2_state, atol=atol)
+        # If the new action's timestep is in the current action queue, aggregate it
+        # TODO: There is probably a way to do this with broadcasting of the two action tensors
+        future_action_queue.put(
+            TimedAction(
+                timestep=new_action.get_timestep(),
+                action=aggregate_fn(current_action_queue[new_action.get_timestep()], new_action.get_action()),
+            )
+        )
+
+    return future_action_queue

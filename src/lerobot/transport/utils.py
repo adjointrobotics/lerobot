@@ -28,7 +28,7 @@ import torch
 from lerobot.transport import services_pb2
 from lerobot.utils.transition import Transition
 
-CHUNK_SIZE = 2 * 1024 * 1024  # 2 MB
+DEFAULT_CHUNK_SIZE = 2 * 1024 * 1024  # 2 MB
 MAX_MESSAGE_SIZE = 4 * 1024 * 1024  # 4 MB
 
 
@@ -39,7 +39,13 @@ def bytes_buffer_size(buffer: io.BytesIO) -> int:
     return result
 
 
-def send_bytes_in_chunks(buffer: bytes, message_class: Any, log_prefix: str = "", silent: bool = True):
+def send_bytes_in_chunks(
+    buffer: bytes,
+    message_class: Any,
+    log_prefix: str = "",
+    silent: bool = True,
+    chunk_size: int = DEFAULT_CHUNK_SIZE,
+):
     buffer = io.BytesIO(buffer)
     size_in_bytes = bytes_buffer_size(buffer)
 
@@ -52,12 +58,12 @@ def send_bytes_in_chunks(buffer: bytes, message_class: Any, log_prefix: str = ""
     while sent_bytes < size_in_bytes:
         transfer_state = services_pb2.TransferState.TRANSFER_MIDDLE
 
-        if sent_bytes + CHUNK_SIZE >= size_in_bytes:
+        if sent_bytes + chunk_size >= size_in_bytes:
             transfer_state = services_pb2.TransferState.TRANSFER_END
         elif sent_bytes == 0:
             transfer_state = services_pb2.TransferState.TRANSFER_BEGIN
 
-        size_to_read = min(CHUNK_SIZE, size_in_bytes - sent_bytes)
+        size_to_read = min(chunk_size, size_in_bytes - sent_bytes)
         chunk = buffer.read(size_to_read)
 
         yield message_class(transfer_state=transfer_state, data=chunk)
@@ -67,7 +73,7 @@ def send_bytes_in_chunks(buffer: bytes, message_class: Any, log_prefix: str = ""
     logging_method(f"{log_prefix} Published {sent_bytes / 1024 / 1024} MB")
 
 
-def receive_bytes_in_chunks(iterator, queue: Queue | None, shutdown_event: Event, log_prefix: str = ""):
+def receive_bytes_in_chunks(iterator, queue: "Queue | None", shutdown_event: Event, log_prefix: str = ""):  # ruff: noqa
     bytes_buffer = io.BytesIO()
     step = 0
 
@@ -155,6 +161,9 @@ def grpc_channel_options(
     max_attempts: int = 5,
     backoff_multiplier: float = 2,
     max_backoff: str = "2s",
+    keepalive_time_ms: int = 10000,  # send keepalive every keepalive_time_ms
+    keepalive_timeout_ms: int = 3000,  # wait keepalive_timeout_ms for ACK before closing
+    keepalive_permit_without_calls: int = 1,  # allow keepalive even with no RPCs
 ):
     service_config = {
         "methodConfig": [
@@ -183,4 +192,7 @@ def grpc_channel_options(
         ("grpc.max_send_message_length", max_send_message_length),
         ("grpc.enable_retries", retries_option),
         ("grpc.service_config", service_config_json),
+        ("grpc.keepalive_time_ms", keepalive_time_ms),
+        ("grpc.keepalive_timeout_ms", keepalive_timeout_ms),
+        ("grpc.keepalive_permit_without_calls", keepalive_permit_without_calls),
     ]
