@@ -360,18 +360,8 @@ class PI0Policy(PreTrainedPolicy):
         return super().from_pretrained(*args, **kwargs)
 
     @torch.no_grad()
-    def predict_action_chunk(self, batch: dict[str, Tensor]) -> Tensor:
+    def predict_action_chunk(self, batch: dict[str, Tensor], noise: Tensor | None = None) -> Tensor:
         """Predict a chunk of actions given environment observations."""
-        raise NotImplementedError("Currently not implemented for PI0")
-
-    @torch.no_grad()
-    def select_action(self, batch: dict[str, Tensor], noise: Tensor | None = None) -> Tensor:
-        """Select a single action given environment observations.
-
-        This method wraps `select_actions` in order to return one action at a time for execution in the
-        environment. It works by managing the actions in a queue and only calling `select_actions` when the
-        queue is empty.
-        """
         self.eval()
 
         if self.config.adapt_to_pi_aloha:
@@ -399,9 +389,24 @@ class PI0Policy(PreTrainedPolicy):
             if self.config.adapt_to_pi_aloha:
                 actions = self._pi_aloha_encode_actions(actions)
 
-            # `self.model.forward` returns a (batch_size, n_action_steps, action_dim) tensor, but the queue
-            # effectively has shape (n_action_steps, batch_size, *), hence the transpose.
-            self._action_queue.extend(actions.transpose(0, 1))
+            return actions
+
+    @torch.no_grad()
+    def select_action(self, batch: dict[str, Tensor], noise: Tensor | None = None) -> Tensor:
+        """Select a single action given environment observations.
+
+        This method wraps `select_actions` in order to return one action at a time for execution in the
+        environment. It works by managing the actions in a queue and only calling `select_actions` when the
+        queue is empty.
+        """
+        self.eval()
+
+        actions = self.predict_action_chunk(batch, noise)
+
+        # `self.model.forward` returns a (batch_size, n_action_steps, action_dim) tensor, but the queue
+        # effectively has shape (n_action_steps, batch_size, *), hence the transpose.
+        self._action_queue.extend(actions.transpose(0, 1))
+
         return self._action_queue.popleft()
 
     def forward(self, batch: dict[str, Tensor], noise=None, time=None) -> tuple[Tensor, dict[str, Tensor]]:
