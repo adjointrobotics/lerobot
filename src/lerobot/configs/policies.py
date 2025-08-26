@@ -202,6 +202,11 @@ class PreTrainedConfig(draccus.ChoiceRegistry, HubMixin, abc.ABC):
             config_file = f.name
             f.flush()
 
-            cli_overrides = policy_kwargs.pop("cli_overrides", [])
+            # HACK on top of HACK: this is so we can create a pretrained config with cli_overrides as a config param
+            cli_overrides = policy_kwargs.pop("policy_kwargs", {}).pop("cli_overrides", [])
+            # HACK: Convert string to list of args if needed
+            if isinstance(cli_overrides, str):
+                cli_overrides = cli_overrides.split()
+            print(f"CLI OVERRIDES {cli_overrides}")
             with draccus.config_type("json"):
                 return draccus.parse(orig_config.__class__, config_file, args=cli_overrides)
