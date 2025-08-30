@@ -70,6 +70,7 @@ from lerobot.robots import (  # noqa: F401
     make_robot_from_config,
     so100_follower,
     so101_follower,
+    widow_ai_follower,
 )
 from lerobot.teleoperators import (  # noqa: F401
     Teleoperator,
@@ -81,6 +82,7 @@ from lerobot.teleoperators import (  # noqa: F401
     make_teleoperator_from_config,
     so100_leader,
     so101_leader,
+    widow_ai_leader,
 )
 from lerobot.utils.robot_utils import busy_wait
 from lerobot.utils.utils import init_logging, move_cursor_up
@@ -107,11 +109,23 @@ def teleop_loop(
     while True:
         loop_start = time.perf_counter()
         action = teleop.get_action()
+        
+        observation = robot.get_observation()
+        
         if display_data:
-            observation = robot.get_observation()
             log_rerun_data(observation, action)
 
         robot.send_action(action)
+        
+        # Force feedback
+        if hasattr(teleop, 'send_feedback'):
+            try:
+                force_feedback = {key: val for key, val in observation.items() if key.endswith('.force')}
+                if force_feedback:
+                    teleop.send_feedback(force_feedback)
+            except Exception as e:
+                logging.debug(f"Force feedback failed: {e}")
+        
         dt_s = time.perf_counter() - loop_start
         busy_wait(1 / fps - dt_s)
 
